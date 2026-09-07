@@ -101,15 +101,41 @@ def sp_solve_lp(dates, k_c, pool, timeout_s=60, r2_prime=False, contract=None):
     duals = {"store": {c: cons_store[c].DualValue() for c in cons_store},
              "date": {dd: cons_date[dd].DualValue() for dd in cons_date}}
     return solver.Objective().Value(), duals
+def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None,
+                return_diagnostics=False):
+    """Solve the restricted SP integer problem with CP-SAT.
 
-
-def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None):
-    """SP 整数精确解 (CP-SAT). r2_prime=True 时施加每店单一星期几硬约束.
-    contract 非 None: 合同模式 — 池预过滤 + 覆盖 RHS 线性化 (sum x == sum f·z, 取代 ==k),
-    z 开放全部星期几 (线性化自剪枝)."""
+    The historical two-value return is preserved by default. With
+    return_diagnostics=True the function returns (objective_km, days, info),
+    including solver status, objective, bound, and pool size.
+    """
     from ortools.sat.python import cp_model
+
+    dropped = 0
     if contract is not None:
-        pool, _ = _contract_pool_filter(pool, legal_date_map(contract, dates))
+        pool, dropped = _contract_pool_filter(
+            pool, legal_date_map(contract, dates)
+        )
+    diagnostics = {
+        "status": None,
+        "solver_status": None,
+        "optimality_proven": False,
+        "objective_value_milli": None,
+        "best_bound_milli": None,
+        "time_limit_s": float(timeout_s),
+        "wall_time_s": None,
+        "pool_size": len(pool),
+        "contract_pool_dropped": int(dropped),
+    }
+
+    def finish(km, days, status):
+        diagnostics["status"] = status
+        if diagnostics["solver_status"] is None:
+            diagnostics["solver_status"] = status
+        if return_diagnostics:
+            return km, days, diagnostics
+        return km, days
+
     m = cp_model.CpModel()
     xv = {}
     for idx, (date, route, km) in enumerate(pool):
@@ -117,7 +143,7 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None):
     for dd in dates:
         cols = [i for i, (date, _, _) in enumerate(pool) if date == dd]
         if not cols:
-            return None, None
+            return finish(None, None, "PRECHECK_INFEASIBLE")
         m.AddExactlyOne([xv[i] for i in cols])
     for c, k in k_c.items():
         if contract is not None:
@@ -134,7 +160,7 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None):
             ws = list(wd_g) if contract is not None else \
                 [w for w, ds in wd_g.items() if k_c[c] <= len(ds)]
             if not ws:
-                return None, None
+                return finish(None, None, "PRECHECK_INFEASIBLE")
             zc = {w: m.NewBoolVar(f"z_{c}_{w}") for w in ws}
             m.AddExactlyOne(list(zc.values()))
             z[c] = zc
@@ -142,7 +168,7 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None):
                 cols = [i for i, (_, route, _) in enumerate(pool) if c in route]
                 if not cols:
                     # 合同义务在池过滤后零合法列 = 不可行 (过滤可饿死店), 不是可跳过的约束
-                    return None, None
+                    return finish(None, None, "PRECHECK_INFEASIBLE")
                 # 合同覆盖线性化: 覆盖数 == 所选星期几的合同槽位数 f(c,w)
                 m.Add(sum(xv[i] for i in cols) == sum(fw[c][w] * zc[w] for w in ws))
         for i, (date, route, _) in enumerate(pool):
@@ -155,8 +181,23 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None):
     solver.parameters.max_time_in_seconds = timeout_s
     solver.parameters.num_search_workers = 8
     st = solver.Solve(m)
+    status_name = {
+        cp_model.OPTIMAL: "OPTIMAL",
+        cp_model.FEASIBLE: "FEASIBLE",
+        cp_model.INFEASIBLE: "INFEASIBLE",
+        cp_model.MODEL_INVALID: "MODEL_INVALID",
+        cp_model.UNKNOWN: "UNKNOWN",
+    }.get(st, f"STATUS_{st}")
+    diagnostics.update({
+        "solver_status": status_name,
+        "optimality_proven": st == cp_model.OPTIMAL,
+        "wall_time_s": float(solver.WallTime()),
+    })
+    if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        diagnostics["objective_value_milli"] = float(solver.ObjectiveValue())
+        diagnostics["best_bound_milli"] = float(solver.BestObjectiveBound())
     if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return None, None
+        return finish(None, None, status_name)
     sel = {dd: None for dd in dates}
     for i, (date, route, km) in enumerate(pool):
         if solver.Value(xv[i]):
@@ -164,5 +205,9 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None):
             if cur is None or km < cur[1]:
                 sel[date] = (list(route), km)
     if any(v is None for v in sel.values()):
-        return None, None
-    return sum(v[1] for v in sel.values()), {dd: v[0] for dd, v in sel.items()}
+        return finish(None, None, "INCOMPLETE_SOLUTION")
+    diagnostics["selected_objective_milli"] = sum(
+        int(round(v[1] * 1000)) for v in sel.values()
+    )
+    km_pool = sum(v[1] for v in sel.values())
+    return finish(km_pool, {dd: v[0] for dd, v in sel.items()}, status_name)
