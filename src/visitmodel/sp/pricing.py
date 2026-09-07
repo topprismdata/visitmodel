@@ -62,3 +62,63 @@ def price_columns(dates, k_c, duals, D, candidates_per_date=24, top_m=40, col_it
                 cands.append((rc, dd, list(route), round(day_km(route, D), 3)))
     cands.sort(key=lambda z0: z0[0])
     return [(dd, route, km) for rc, dd, route, km in cands[:col_iter]]
+
+
+def price_columns_v2(dates, k_c, date_duals, link_duals, D,
+                     candidates_per_date=24, top_m=40, col_iter=60,
+                     max_daily=None, min_daily=None, legal=None):
+    """v2 定价: 奖励 = −β_cd (店-日链接对偶, 逐店逐日期), rc = km − π_d − Σ reward.
+
+    与 price_columns 的差异: 门店奖励从跨日共享的 μ_c 换成逐 (店,日期) 的
+    −β_cd (vNext 链接行对偶), 与 fixed-row master 的代数严格闭合。
+    其余启发式结构 ([ESF] §7.1 批量定价 + 支配剪枝 + 走廊硬截断) 不变;
+    能力边界相同: 只报告"发现"的负列, 不证明不存在其他负列。"""
+    out = []
+    for dd in dates:
+        w_d = date_duals.get(dd, 0.0)
+        reward = {c: -link_duals.get((c, dd), 0.0) for c in k_c}
+        all_stores = sorted(k_c.keys(), key=lambda c: -reward[c])[:top_m]
+        col_count = 0
+        for start_c in all_stores:
+            if col_count >= col_iter:
+                break
+            if legal is not None and dd not in legal.get(start_c, ()):
+                continue
+            if reward.get(start_c, 0.0) <= 0:
+                continue
+            route = [start_c]
+            in_day = {start_c}
+            while True:
+                if max_daily is not None and len(route) >= max_daily:
+                    break
+                best_c, best_margin, best_pos = None, 1e-9, None
+                for c in all_stores:
+                    if c in in_day:
+                        continue
+                    if legal is not None and dd not in legal.get(c, ()):
+                        continue
+                    uc = reward.get(c, 0.0)
+                    if uc <= best_margin:
+                        break
+                    bd, bp = D[c][route[0]], 0
+                    for k in range(len(route) - 1):
+                        dlt = D[route[k]][c] + D[c][route[k+1]] - D[route[k]][route[k+1]]
+                        if dlt < bd:
+                            bd, bp = dlt, k + 1
+                    d_last = D[route[-1]][c]
+                    if d_last < bd:
+                        bd, bp = d_last, len(route)
+                    margin = uc - bd
+                    if margin > best_margin:
+                        best_c, best_margin, best_pos = c, margin, bp
+                if best_c is None:
+                    break
+                route.insert(best_pos, best_c)
+                in_day.add(best_c)
+            rc = day_km(route, D) - sum(reward.get(c, 0.0) for c in route) - w_d
+            lo = max(2, min_daily or 2)
+            if rc < -1e-6 and len(route) >= lo:
+                col_count += 1
+                out.append((dd, list(route), day_km(route, D)))
+    out.sort(key=lambda z: z[0])
+    return out[:col_iter]
