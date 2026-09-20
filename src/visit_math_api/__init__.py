@@ -32,10 +32,14 @@ __all__ = [
     "Violation",
     "ValidationReport",
     "SolverBackend",
-    "EMPTY_MAP",
 ]
 
 EMPTY_MAP: Mapping = MappingProxyType({})
+
+
+def _empty_map() -> Mapping:
+    """dataclass 默认值工厂 (mappingproxy 实例不可直接作 default)."""
+    return MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -81,7 +85,7 @@ class VisitPlanningInstance:
     fixed_visits: frozenset  # mandatory_visit 客户 (C4)
     objective_terms: tuple[ObjectiveTerm, ...]
     source_map: SourceMap
-    metadata: Mapping[str, str] = EMPTY_MAP  # 扁平溯源: schema_version 等
+    metadata: Mapping[str, str] = field(default_factory=_empty_map)  # 扁平溯源
 
 
 @dataclass(frozen=True)
@@ -91,7 +95,7 @@ class SolverConfig:
     backend: str  # "greedy" | "alns" | "cp_sat" | ...
     time_limit_s: float = 60.0
     seed: int = 0
-    params: Mapping[str, str] = EMPTY_MAP
+    params: Mapping[str, str] = field(default_factory=_empty_map)
 
 
 @dataclass(frozen=True)
@@ -111,7 +115,7 @@ class SolveResult:
     gap: Optional[float] = None
     violated_constraints: tuple[str, ...] = ()  # INFEASIBLE 时非空
     termination_reason: str = ""
-    solver_stats: Mapping[str, float] = EMPTY_MAP  # iters / accepted / elapsed_s
+    solver_stats: Mapping[str, float] = field(default_factory=_empty_map)  # iters/accepted/elapsed_s
     instance_hash: str = ""  # G4: 所解实例指纹
 
 
