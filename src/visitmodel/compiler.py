@@ -79,6 +79,12 @@ class MathCompiler:
                         f"protected customer {p.customer_code}: "
                         f"legal_dates {len(contract.legal_dates)} < obligation {contract.obligation}"
                     )
+        weekday_slot_map: dict[str, dict[int, frozenset]] = {}
+        for code, w, slots in spec.weekday_slots:
+            weekday_slot_map.setdefault(code, {})[w] = frozenset(slots)
+        slot_dates = MappingProxyType(
+            {c: MappingProxyType(dict(m)) for c, m in weekday_slot_map.items()}
+        )
         return VisitPlanningInstance(
             customers=customers,
             workdays=workdays,
@@ -89,6 +95,7 @@ class MathCompiler:
             objective_terms=self._translate_objective(spec.objective_policy),
             source_map=SourceMap(entries=CONSTRAINT_IDS),
             metadata=self._flat_metadata(spec.metadata),
+            slot_dates=slot_dates,
         )
 
     @staticmethod

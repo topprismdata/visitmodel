@@ -87,7 +87,10 @@ class VisitPlanningInstance:
     fixed_visits: frozenset  # mandatory_visit 客户 (C4)
     objective_terms: tuple[ObjectiveTerm, ...]
     source_map: SourceMap
-    metadata: Mapping[str, str] = field(default_factory=_empty_map)  # 扁平溯源
+    metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))  # 扁平溯源
+    slot_dates: Mapping[str, Mapping] = field(default_factory=lambda: MappingProxyType({}))
+    # slot_dates: customer_code → {weekday: 该合同在该星期几的槽位日期集}
+    # (R2′ 换挡语义; 缺省空 = C3 退化为 eligible_days 严格口径)
 
 
 @dataclass(frozen=True)

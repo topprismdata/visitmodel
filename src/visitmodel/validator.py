@@ -60,6 +60,7 @@ class MathValidator:
 
         # ---- 结构检查 + 单店计数 (一次遍历) ----
         visits: dict[str, int] = defaultdict(int)
+        store_dates: dict[str, set] = defaultdict(set)
         for d, seq in solution.items():
             if d not in workdays:
                 v.append(self._v(_WORKDAY_SET, f"date {d} not in instance.workdays"))
@@ -72,8 +73,31 @@ class MathValidator:
                     v.append(self._v(_SAME_DAY_DUP, f"customer {c} visited twice on {d}"))
                 seen.add(c)
                 visits[c] += 1
-                if d not in eligible.get(c, frozenset()):
-                    v.append(self._v(_ELIGIBILITY, f"customer {c} on ineligible date {d}"))
+                store_dates[c].add(d)
+
+        # ---- C3 合法日期 (R2′ 换挡语义, 若实例携带 slot_dates): ----
+        # 店在场时, 其日期集必须恰等于 (合同, φ, 所选星期几) 的槽位集 —
+        # 换星期几合法, 错相位/漏槽位不合法; 缺 slot_dates 时退化为
+        # eligible_days 成员检查 (严格 σ 口径)。
+        for c, ds in store_dates.items():
+            slots_by_wd = instance.slot_dates.get(c) if instance.slot_dates else None
+            if slots_by_wd:
+                wds = {d.weekday() for d in ds}
+                if len(wds) != 1:
+                    v.append(self._v(_ELIGIBILITY, f"customer {c} spans weekdays {sorted(wds)}"))
+                    continue
+                exact = slots_by_wd.get(next(iter(wds)), frozenset())
+                if ds != exact:
+                    missing = sorted(str(d) for d in exact - ds)
+                    extra = sorted(str(d) for d in ds - exact)
+                    v.append(self._v(
+                        _ELIGIBILITY,
+                        f"customer {c} dates != contract slots "
+                        f"(missing {missing}, unexpected {extra})"))
+            else:
+                for d in ds:
+                    if d not in eligible.get(c, frozenset()):
+                        v.append(self._v(_ELIGIBILITY, f"customer {c} on ineligible date {d}"))
 
         # ---- C1 义务守恒 (+C4 核心保全) ----
         for c in instance.customers:
