@@ -32,6 +32,8 @@ __all__ = [
     "Violation",
     "ValidationReport",
     "SolverBackend",
+    "DecisionEpisode",
+    "episode_hash",
 ]
 
 EMPTY_MAP: Mapping = MappingProxyType({})
@@ -145,6 +147,54 @@ class SolverBackend(Protocol):
     """
 
     def solve(self, instance: VisitPlanningInstance, config: SolverConfig) -> SolveResult: ...
+
+
+@dataclass(frozen=True)
+class DecisionEpisode:
+    """决策留痕最小 envelope (v0.2 §7, G4 可复现性的运行时载体).
+
+    目标: 今天生成的计划, 将来还能回答 — "这个结果是在什么业务事实、
+    什么规则版本、什么数学模型、什么 solver 参数下产生的?"
+    完整 Decision Memory 后置; 本 envelope 现在就必须随每次求解落账.
+    """
+
+    episode_id: str
+    source_snapshot_id: str
+    semantic_spec_version: str
+    semantic_spec_hash: str
+    instance_hash: str
+    solver_backend: str
+    solver_version: str
+    solver_config_hash: str
+    seed: int
+    solution_id: str
+    status: str
+    termination_reason: str
+    exception_grant_ids: tuple = ()
+    decision_timestamp: str = ""
+
+
+def episode_hash(episode: DecisionEpisode) -> str:
+    """确定性指纹 (不含 episode_id / timestamp — 同一决策重放同哈希)."""
+    import hashlib
+    import json
+    payload = {
+        "source_snapshot_id": episode.source_snapshot_id,
+        "semantic_spec_version": episode.semantic_spec_version,
+        "semantic_spec_hash": episode.semantic_spec_hash,
+        "instance_hash": episode.instance_hash,
+        "solver_backend": episode.solver_backend,
+        "solver_version": episode.solver_version,
+        "solver_config_hash": episode.solver_config_hash,
+        "seed": episode.seed,
+        "solution_id": episode.solution_id,
+        "status": episode.status,
+        "termination_reason": episode.termination_reason,
+        "exception_grant_ids": list(episode.exception_grant_ids),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
 
 
 def sequence_days(solution: Mapping[date, Sequence[str]]) -> Mapping[date, tuple[str, ...]]:
