@@ -44,16 +44,26 @@ def _fw_table(contracts, wd_groups):
             for c, (k, p) in contracts.items()}
 
 
-def sp_solve_lp(dates, k_c, pool, timeout_s=60, r2_prime=False, contract=None):
+def sp_solve_lp(dates, k_c, pool, timeout_s=60, r2_prime=False, contract=None,
+                legal=None, fw=None):
     """受限主问题 LP 值 (GLOP). 返回 (rmp_lp, duals) 或 (None, None).
-    contract 非 None: 合同模式 — 池预过滤 + 覆盖 RHS 线性化 (sum x == sum f·z, 取代 ==k),
-    z 开放全部星期几; store 对偶 = 该店合同覆盖约束的影子价格."""
+    合同语义两种供给 (Phase D1/D2 拆分):
+    - contract= 原始合同字典 (legacy; 内部经 visit_ir 翻译, 迁移期保留);
+    - legal=+fw= 编译视图 (L1 派生, orchestration.contract_view) — 首选;
+      view 模式下覆盖走 z 线性化 (等价 contract 模式).
+    """
     from ortools.linear_solver import pywraplp
+    if contract is not None:
+        if legal is None:
+            legal = legal_date_map(contract, dates)
+        if fw is None:
+            fw = _fw_table(contract, weekday_dates(dates))
+    view = contract is not None or (legal is not None and fw is not None)
     solver = pywraplp.Solver.CreateSolver("GLOP")
     if solver is None:
         return None, None
-    if contract is not None:
-        pool, _ = _contract_pool_filter(pool, legal_date_map(contract, dates))
+    if legal is not None:
+        pool, _ = _contract_pool_filter(pool, legal)
     x = {i: solver.NumVar(0, 1, f"x{i}") for i in range(len(pool))}
     cons_date, cons_store = {}, {}
     for dd in dates:
@@ -62,25 +72,24 @@ def sp_solve_lp(dates, k_c, pool, timeout_s=60, r2_prime=False, contract=None):
             return None, None
         cons_date[dd] = solver.Add(sum(x[i] for i in cols) == 1)
     for c, k in k_c.items():
-        if contract is not None:
+        if view:
             continue          # 合同模式: 覆盖等式在 z 线性化段统一施加
         cols = [i for i, (_, route, _) in enumerate(pool) if c in route]
         if cols:
             cons_store[c] = solver.Add(sum(x[i] for i in cols) == k)
     z = {}
-    if r2_prime or contract is not None:
+    if r2_prime or view:
         wd_g = weekday_dates(dates)
-        fw = _fw_table(contract, wd_g) if contract is not None else None
         for c in k_c:
             # contract+r2_prime 组合: 合同分支优先; z 绑定仍强制单一星期几, 相位合法性由池过滤保证
-            ws = list(wd_g) if contract is not None else \
+            ws = list(wd_g) if view else \
                 [w for w, ds in wd_g.items() if k_c[c] <= len(ds)]
             if not ws:
                 return None, None
             zc = {w: solver.NumVar(0, 1, f"z_{c}_{w}") for w in ws}
             solver.Add(sum(zc.values()) == 1)
             z[c] = zc
-            if contract is not None:
+            if view:
                 cols = [i for i, (_, route, _) in enumerate(pool) if c in route]
                 if not cols:
                     # 合同义务在池过滤后零合法列 = 不可行 (过滤可饿死店), 不是可跳过的约束
@@ -102,7 +111,7 @@ def sp_solve_lp(dates, k_c, pool, timeout_s=60, r2_prime=False, contract=None):
              "date": {dd: cons_date[dd].DualValue() for dd in cons_date}}
     return solver.Objective().Value(), duals
 def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None,
-                return_diagnostics=False):
+                legal=None, fw=None, return_diagnostics=False):
     """Solve the restricted SP integer problem with CP-SAT.
 
     The historical two-value return is preserved by default. With
@@ -111,11 +120,15 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None,
     """
     from ortools.sat.python import cp_model
 
-    dropped = 0
     if contract is not None:
-        pool, dropped = _contract_pool_filter(
-            pool, legal_date_map(contract, dates)
-        )
+        if legal is None:
+            legal = legal_date_map(contract, dates)
+        if fw is None:
+            fw = _fw_table(contract, weekday_dates(dates))
+    view = contract is not None or (legal is not None and fw is not None)
+    dropped = 0
+    if legal is not None:
+        pool, dropped = _contract_pool_filter(pool, legal)
     diagnostics = {
         "status": None,
         "solver_status": None,
@@ -146,25 +159,24 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None,
             return finish(None, None, "PRECHECK_INFEASIBLE")
         m.AddExactlyOne([xv[i] for i in cols])
     for c, k in k_c.items():
-        if contract is not None:
+        if view:
             continue          # 合同模式: 覆盖等式在 z 线性化段统一施加
         cols = [i for i, (_, route, _) in enumerate(pool) if c in route]
         if cols:
             m.Add(sum(xv[i] for i in cols) == k)
     z = {}
-    if r2_prime or contract is not None:
+    if r2_prime or view:
         wd_g = weekday_dates(dates)
-        fw = _fw_table(contract, wd_g) if contract is not None else None
         for c in k_c:
             # contract+r2_prime 组合: 合同分支优先; z 绑定仍强制单一星期几, 相位合法性由池过滤保证
-            ws = list(wd_g) if contract is not None else \
+            ws = list(wd_g) if view else \
                 [w for w, ds in wd_g.items() if k_c[c] <= len(ds)]
             if not ws:
                 return finish(None, None, "PRECHECK_INFEASIBLE")
             zc = {w: m.NewBoolVar(f"z_{c}_{w}") for w in ws}
             m.AddExactlyOne(list(zc.values()))
             z[c] = zc
-            if contract is not None:
+            if view:
                 cols = [i for i, (_, route, _) in enumerate(pool) if c in route]
                 if not cols:
                     # 合同义务在池过滤后零合法列 = 不可行 (过滤可饿死店), 不是可跳过的约束
