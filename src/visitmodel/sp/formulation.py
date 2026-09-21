@@ -111,7 +111,8 @@ def sp_solve_lp(dates, k_c, pool, timeout_s=60, r2_prime=False, contract=None,
              "date": {dd: cons_date[dd].DualValue() for dd in cons_date}}
     return solver.Objective().Value(), duals
 def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None,
-                legal=None, fw=None, return_diagnostics=False):
+                legal=None, fw=None, sigma=None, sigma_budget=None,
+                return_diagnostics=False):
     """Solve the restricted SP integer problem with CP-SAT.
 
     The historical two-value return is preserved by default. With
@@ -153,6 +154,17 @@ def sp_solve_ip(dates, k_c, pool, timeout_s=120, r2_prime=False, contract=None,
     xv = {}
     for idx, (date, route, km) in enumerate(pool):
         xv[idx] = m.NewBoolVar(f"x{idx}")
+    # σ 预算 (帕累托前沿用): 违反服务日的店数 ≤ sigma_budget
+    # (每店被覆盖恰一次 → 逐列违规店数线性相加 = 违规店总数)
+    if sigma is not None and sigma_budget is not None:
+        viol_terms = []
+        for idx, (date, route, km) in enumerate(pool):
+            w = date.weekday() + 1
+            vc = sum(1 for c in route if w not in sigma.get(c, set()))
+            if vc:
+                viol_terms.append(vc * xv[idx])
+        if viol_terms:
+            m.Add(sum(viol_terms) <= int(sigma_budget))
     for dd in dates:
         cols = [i for i, (date, _, _) in enumerate(pool) if date == dd]
         if not cols:
